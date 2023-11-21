@@ -53,7 +53,7 @@ class RequestEssentialsExtension extends OperationExtension
 
         $operation
             ->setMethod(strtolower($routeInfo->route->methods()[0]))
-            ->setPath(Str::replace(
+            ->setPath($routeInfo->route->domain() . '/' . Str::replace(
                 collect($pathAliases)->keys()->map(fn ($k) => '{'.$k.'}')->all(),
                 collect($pathAliases)->values()->map(fn ($v) => '{'.$v.'}')->all(),
                 $routeInfo->route->uri,

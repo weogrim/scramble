@@ -108,7 +108,7 @@ class OpenApi
             $paths = [];
 
             foreach ($this->paths as $pathBuilder) {
-                $paths['/'.$pathBuilder->path] = array_merge(
+                $paths[$pathBuilder->path] = array_merge(
                     $paths['/'.$pathBuilder->path] ?? [],
                     $pathBuilder->toArray(),
                 );

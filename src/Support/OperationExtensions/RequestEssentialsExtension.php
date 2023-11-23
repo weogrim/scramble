@@ -130,7 +130,7 @@ class RequestEssentialsExtension extends OperationExtension
             return [];
         }
 
-        return explode(',', $tagNodes[0]->value->value);
+        return explode(',', Arr::first($tagNodes)->value->value);
     }
 
     private function getParametersFromString(?string $str)

@@ -5,6 +5,7 @@ namespace Dedoc\Scramble\Infer\Analyzer;
 use Dedoc\Scramble\Infer\Context;
 use Dedoc\Scramble\Infer\Definition\ClassDefinition;
 use Dedoc\Scramble\Infer\Definition\FunctionLikeDefinition;
+use Dedoc\Scramble\Infer\Handler\IndexBuildingHandler;
 use Dedoc\Scramble\Infer\Reflector\ClassReflector;
 use Dedoc\Scramble\Infer\Scope\Index;
 use Dedoc\Scramble\Infer\Scope\NodeTypesResolver;
@@ -22,14 +23,14 @@ class MethodAnalyzer
     public function __construct(
         private Index $index,
         private ClassDefinition $classDefinition,
-    ) {
-    }
+    ) {}
 
-    public function analyze(FunctionLikeDefinition $methodDefinition)
+    public function analyze(FunctionLikeDefinition $methodDefinition, array $indexBuilders = [])
     {
         $this->traverseClassMethod(
             [$this->getClassReflector()->getMethod($methodDefinition->type->name)->getAstNode()],
             $methodDefinition,
+            $indexBuilders,
         );
 
         $methodDefinition = $this->index
@@ -46,7 +47,7 @@ class MethodAnalyzer
         return ClassReflector::make($this->classDefinition->name);
     }
 
-    private function traverseClassMethod(array $nodes, FunctionLikeDefinition $methodDefinition)
+    private function traverseClassMethod(array $nodes, FunctionLikeDefinition $methodDefinition, array $indexBuilders = [])
     {
         $traverser = new NodeTraverser;
 
@@ -57,6 +58,7 @@ class MethodAnalyzer
             $nameResolver,
             new Scope($this->index, new NodeTypesResolver(), new ScopeContext($this->classDefinition), $nameResolver),
             Context::getInstance()->extensionsBroker->extensions,
+            [new IndexBuildingHandler($indexBuilders)],
         ));
 
         $node = (new NodeFinder())

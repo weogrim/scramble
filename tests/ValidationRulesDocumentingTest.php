@@ -212,6 +212,21 @@ it('converts max rule into "maxItems" for array fields', function () {
         ->toHaveKey('maxItems', 8);
 });
 
+it('documents nullable uri rule', function () {
+    $rules = [
+        'page_url' => ['nullable', 'url'],
+    ];
+
+    $params = app()->make(RulesToParameters::class, ['rules' => $rules])->handle();
+
+    expect($params = collect($params)->all())
+        ->toHaveCount(1)
+        ->and($params[0]->schema->type)
+        ->toBeInstanceOf(\Dedoc\Scramble\Support\Generator\Types\StringType::class)
+        ->toHaveProperty('format', 'uri')
+        ->toHaveProperty('nullable', true);
+});
+
 it('extracts rules from request->validate call', function () {
     RouteFacade::get('api/test', [ValidationRulesDocumenting_Test::class, 'index']);
 
@@ -240,10 +255,9 @@ it('extracts rules docs from form request', function () {
 });
 
 it('extracts rules from Validator::make facade call', function () {
-    RouteFacade::get('api/test', [ValidationFacadeRulesDocumenting_Test::class, 'index']);
-
-    Scramble::routes(fn (Route $r) => $r->uri === 'api/test');
-    $openApiDocument = app()->make(\Dedoc\Scramble\Generator::class)();
+    $openApiDocument = generateForRoute(function () {
+        return RouteFacade::get('api/test', [ValidationFacadeRulesDocumenting_Test::class, 'index']);
+    });
 
     assertMatchesSnapshot($openApiDocument);
 });
@@ -277,7 +291,7 @@ class ValidationFacadeRulesDocumenting_Test
     {
         Validator::make($request->all(), [
             'content' => ['required', Rule::in('wow')],
-        ]);
+        ], attributes: []);
     }
 }
 
@@ -395,7 +409,5 @@ class ControllerWithoutSecurity
     /**
      * @unauthenticated
      */
-    public function index()
-    {
-    }
+    public function index() {}
 }

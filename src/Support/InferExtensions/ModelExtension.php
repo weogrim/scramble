@@ -3,26 +3,31 @@
 namespace Dedoc\Scramble\Support\InferExtensions;
 
 use Carbon\Carbon;
+use Carbon\CarbonImmutable;
 use Dedoc\Scramble\Infer\Definition\ClassDefinition;
 use Dedoc\Scramble\Infer\Extensions\Event\MethodCallEvent;
 use Dedoc\Scramble\Infer\Extensions\Event\PropertyFetchEvent;
 use Dedoc\Scramble\Infer\Extensions\MethodReturnTypeExtension;
 use Dedoc\Scramble\Infer\Extensions\PropertyTypeExtension;
 use Dedoc\Scramble\Support\ResponseExtractor\ModelInfo;
+use Dedoc\Scramble\Support\Type\AbstractType;
 use Dedoc\Scramble\Support\Type\ArrayItemType_;
 use Dedoc\Scramble\Support\Type\ArrayType;
 use Dedoc\Scramble\Support\Type\BooleanType;
 use Dedoc\Scramble\Support\Type\FloatType;
 use Dedoc\Scramble\Support\Type\Generic;
 use Dedoc\Scramble\Support\Type\IntegerType;
+use Dedoc\Scramble\Support\Type\KeyedArrayType;
 use Dedoc\Scramble\Support\Type\NullType;
 use Dedoc\Scramble\Support\Type\ObjectType;
 use Dedoc\Scramble\Support\Type\StringType;
+use Dedoc\Scramble\Support\Type\TemplateType;
 use Dedoc\Scramble\Support\Type\Type;
 use Dedoc\Scramble\Support\Type\TypeWalker;
 use Dedoc\Scramble\Support\Type\Union;
 use Dedoc\Scramble\Support\Type\UnknownType;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 
 class ModelExtension implements MethodReturnTypeExtension, PropertyTypeExtension
@@ -50,7 +55,9 @@ class ModelExtension implements MethodReturnTypeExtension, PropertyTypeExtension
         $info = $this->getModelInfo($event->getInstance());
 
         if ($attribute = $info->get('attributes')->get($event->getName())) {
-            $baseType = $this->getBaseAttributeType($info->get('instance'), $event->getName(), $attribute);
+            $baseType = $this->getAttributeTypeFromEloquentCasts($attribute['cast'] ?? '')
+                ?? $this->getAttributeTypeFromDbColumnType($attribute['type'], $attribute['driver'])
+                ?? new UnknownType("Virtual attribute ({$attribute['name']}) type inference not supported.");
 
             if ($attribute['nullable']) {
                 return Union::wrap([$baseType, new NullType()]);
@@ -66,33 +73,67 @@ class ModelExtension implements MethodReturnTypeExtension, PropertyTypeExtension
         throw new \LogicException('Should not happen');
     }
 
-    private function getBaseAttributeType(Model $model, string $key, array $value)
+    /**
+     * MySQL/MariaDB decimal is mapped to a string by PDO.
+     * Floating point numbers and decimals are all mapped to strings when using the pgsql driver.
+     */
+    private function getAttributeTypeFromDbColumnType(?string $columnType, ?string $dbDriverName): ?AbstractType
     {
-        $type = explode(' ', $value['type']);
-        $typeName = explode('(', $type[0])[0];
-
-        if (in_array($key, $model->getDates())) {
-            return new ObjectType(Carbon::class);
+        if ($columnType === null) {
+            return null;
         }
 
-        $attributeType = match ($typeName) {
-            'int', 'integer', 'bigint' => new IntegerType(),
-            'float', 'double', 'decimal' => new FloatType(),
-            'string', 'text', 'datetime' => new StringType(),
+        $typeName = str($columnType)
+            ->before(' ') // strip modifiers from a type name such as `bigint unsigned`
+            ->before('(') // strip the length from a type name such as `tinyint(4)`
+            ->toString();
+
+        if (in_array($typeName, ['int', 'integer', 'tinyint', 'smallint', 'mediumint', 'bigint'])) {
+            return new IntegerType();
+        }
+
+        if ($dbDriverName === 'sqlite' && in_array($typeName, ['float', 'double', 'decimal'])) {
+            return new FloatType();
+        }
+
+        if (in_array($dbDriverName, ['mysql', 'mariadb']) && in_array($typeName, ['float', 'double'])) {
+            return new FloatType();
+        }
+
+        return new StringType();
+    }
+
+    /**
+     * @todo Add support for custom castables.
+     */
+    private function getAttributeTypeFromEloquentCasts(string $cast): ?AbstractType
+    {
+        if ($cast && enum_exists($cast)) {
+            return new ObjectType($cast);
+        }
+
+        $castAsType = Str::before($cast, ':');
+        $castAsParameters = str($cast)->after("{$castAsType}:")->explode(',');
+
+        if (Str::startsWith($castAsType, 'encrypted:')) {
+            $castAsType = $castAsParameters->first(); // array, collection, json, object
+        }
+
+        return match ($castAsType) {
+            'array', 'json' => new ArrayType(),
+            'real', 'float', 'double' => new FloatType(),
+            'int', 'integer', 'timestamp' => new IntegerType(),
             'bool', 'boolean' => new BooleanType(),
-            'json', 'array' => new ArrayType(),
-            default => new UnknownType("unimplemented DB column type [$type[0]]"),
+            'string', 'decimal' => new StringType(),
+            'object' => new ObjectType('\stdClass'),
+            'collection' => new ObjectType(Collection::class),
+            'Illuminate\Database\Eloquent\Casts\AsEnumCollection' => new Generic(Collection::class, [
+                new TemplateType($castAsParameters->first()),
+            ]),
+            'date', 'datetime', 'custom_datetime' => new ObjectType(Carbon::class),
+            'immutable_date', 'immutable_datetime', 'immutable_custom_datetime' => new ObjectType(CarbonImmutable::class),
+            default => null,
         };
-
-        if ($value['cast'] && function_exists('enum_exists') && enum_exists($value['cast'])) {
-            if (! isset($value['cast']::cases()[0]->value)) {
-                return $attributeType;
-            }
-
-            return new ObjectType($value['cast']);
-        }
-
-        return $attributeType;
     }
 
     private function getRelationType(array $relation)
@@ -149,9 +190,9 @@ class ModelExtension implements MethodReturnTypeExtension, PropertyTypeExtension
                 return $event->getInstance()->getPropertyType($name);
             });
 
-        return new ArrayType([
+        return new KeyedArrayType([
             ...$arrayableAttributesTypes->map(fn ($type, $name) => new ArrayItemType_($name, $type))->values()->all(),
-            ...$arrayableRelationsTypes->map(fn ($type, $name) => new ArrayItemType_($name, $type, $isOptional = true))->values()->all(),
+            ...$arrayableRelationsTypes->map(fn ($type, $name) => new ArrayItemType_($name, $type, isOptional: true))->values()->all(),
         ]);
     }
 

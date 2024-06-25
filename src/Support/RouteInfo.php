@@ -6,6 +6,9 @@ use Dedoc\Scramble\Infer;
 use Dedoc\Scramble\Infer\Reflector\MethodReflector;
 use Dedoc\Scramble\Infer\Services\FileParser;
 use Dedoc\Scramble\PhpDoc\PhpDocTypeHelper;
+use Dedoc\Scramble\Support\IndexBuilders\Bag;
+use Dedoc\Scramble\Support\IndexBuilders\RequestParametersBuilder;
+use Dedoc\Scramble\Support\Type\ArrayItemType_;
 use Dedoc\Scramble\Support\Type\BooleanType;
 use Dedoc\Scramble\Support\Type\FloatType;
 use Dedoc\Scramble\Support\Type\FunctionType;
@@ -40,11 +43,14 @@ class RouteInfo
 
     private Infer $infer;
 
+    public readonly Bag $requestParametersFromCalls;
+
     public function __construct(Route $route, FileParser $fileParser, Infer $infer)
     {
         $this->route = $route;
         $this->parser = $fileParser;
         $this->infer = $infer;
+        $this->requestParametersFromCalls = new Bag();
     }
 
     public function isClassBased(): bool
@@ -150,9 +156,7 @@ class RouteInfo
         {
             public int $count = 0;
 
-            public function enter(Type $type)
-            {
-            }
+            public function enter(Type $type) {}
 
             public function leave(Type $type)
             {
@@ -163,6 +167,11 @@ class RouteInfo
                     || $type instanceof FloatType
                     || $type instanceof BooleanType
                     || $type instanceof NullType
+                    /*
+                     * Give some weight for keyed array item so when comparing `array<mixed>` to `array{foo: unknown}`,
+                     * the keyed array is preferred.
+                     */
+                    || $type instanceof ArrayItemType_ && is_string($type->key)
                 ) {
                     $this->count++;
                 }
@@ -203,6 +212,9 @@ class RouteInfo
             ->getMethodReturnType($this->methodName());
     }
 
+    /**
+     * @todo Maybe better name is needed as this method performs method analysis, indexes building, etc.
+     */
     public function getMethodType(): ?FunctionType
     {
         if (! $this->isClassBased() || ! $this->reflectionMethod()) {
@@ -215,7 +227,9 @@ class RouteInfo
             /*
              * Here the final resolution of the method types may happen.
              */
-            $this->methodType = $def->getMethodDefinition($this->methodName())->type;
+            $this->methodType = $def->getMethodDefinition($this->methodName(), indexBuilders: [
+                new RequestParametersBuilder($this->requestParametersFromCalls),
+            ])->type;
         }
 
         return $this->methodType;

@@ -40,15 +40,18 @@ class RulesToParameters
     {
         return collect($this->rules)
             ->map(fn ($rules, $name) => (new RulesToParameter($name, $rules, $this->nodeDocs[$name] ?? null, $this->openApiTransformer))->generate())
-            ->pipe(\Closure::fromCallable([$this, 'handleNested']))
-            ->pipe(\Closure::fromCallable([$this, 'handleConfirmed']))
+            ->filter()
+            ->pipe($this->handleNested(...))
+            ->pipe($this->handleConfirmed(...))
             ->values()
             ->all();
     }
 
     private function handleNested(Collection $parameters)
     {
-        [$nested, $parameters] = $parameters->partition(fn ($_, $key) => Str::contains($key, '.'));
+        [$nested, $parameters] = $parameters
+            ->sortBy(fn ($_, $key) => count(explode('.', $key)))
+            ->partition(fn ($_, $key) => Str::contains($key, '.'));
 
         $nestedParentsKeys = $nested->keys()->map(fn ($key) => explode('.', $key)[0]);
 
@@ -93,19 +96,21 @@ class RulesToParameters
     {
         $confirmedParamNameRules = collect($this->rules)
             ->map(fn ($rules, $name) => [$name, Arr::wrap(is_string($rules) ? explode('|', $rules) : $rules)])
-            ->first(fn ($nameRules) => in_array('confirmed', $nameRules[1]));
+            ->filter(fn ($nameRules) => in_array('confirmed', $nameRules[1]));
 
         if (! $confirmedParamNameRules) {
             return $parameters;
         }
 
-        /** @var Parameter $confirmedParam */
-        $confirmedParam = $parameters->first(fn ($p) => $p->name === $confirmedParamNameRules[0]);
+        foreach ($confirmedParamNameRules as $confirmedParamNameRule) {
+            /** @var Parameter $confirmedParam */
+            $confirmedParam = $parameters->first(fn ($p) => $p->name === $confirmedParamNameRule[0]);
 
-        $parameters->offsetSet(
-            $name = "$confirmedParamNameRules[0]_confirmation",
-            (clone $confirmedParam)->setName($name),
-        );
+            $parameters->offsetSet(
+                $name = "$confirmedParamNameRule[0]_confirmation",
+                (clone $confirmedParam)->setName($name),
+            );
+        }
 
         return $parameters;
     }

@@ -18,9 +18,7 @@ use PhpParser\NodeTraverser;
 
 class AnalysisResult
 {
-    public function __construct(public Index $index)
-    {
-    }
+    public function __construct(public Index $index) {}
 
     public function getClassDefinition(string $string): ?ClassDefinition
     {
@@ -36,7 +34,7 @@ class AnalysisResult
     {
         $code = '<?php $a = '.$code.';';
 
-        $fileAst = (new PhpParser\ParserFactory)->create(PhpParser\ParserFactory::PREFER_PHP7)->parse($code);
+        $fileAst = (new PhpParser\ParserFactory)->createForHostVersion()->parse($code);
 
         $index = $this->index;
         $infer = new TypeInferer(
@@ -49,10 +47,12 @@ class AnalysisResult
         $traverser->addVisitor($infer);
         $traverser->traverse($fileAst);
 
-        return (new ReferenceTypeResolver($this->index))->resolve($scope, $scope->getType(
+        $unresolvedType = $scope->getType(
             new Node\Expr\Variable('a', [
                 'startLine' => INF,
             ]),
-        ));
+        );
+
+        return (new ReferenceTypeResolver($this->index))->resolve($scope, $unresolvedType);
     }
 }

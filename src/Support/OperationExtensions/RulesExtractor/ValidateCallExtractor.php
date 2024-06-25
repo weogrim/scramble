@@ -2,10 +2,12 @@
 
 namespace Dedoc\Scramble\Support\OperationExtensions\RulesExtractor;
 
+use Dedoc\Scramble\Support\SchemaClassDocReflector;
 use Illuminate\Http\Request;
 use PhpParser\Node;
 use PhpParser\NodeFinder;
 use PhpParser\PrettyPrinter\Standard;
+use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocNode;
 
 class ValidateCallExtractor
 {
@@ -32,6 +34,7 @@ class ValidateCallExtractor
             fn (Node $node) => $node instanceof Node\Expr\MethodCall
                 && $node->var instanceof Node\Expr\Variable
                 && is_a($this->getPossibleParamType($methodNode, $node->var), Request::class, true)
+                && $node->name instanceof Node\Identifier
                 && $node->name->name === 'validate'
         );
         $validationRules = $callToValidate->args[0] ?? null;
@@ -41,7 +44,7 @@ class ValidateCallExtractor
             $callToValidate = (new NodeFinder())->findFirst(
                 $methodNode,
                 fn (Node $node) => $node instanceof Node\Expr\MethodCall
-                    && count($node->args) === 2
+                    && count($node->args) >= 2
                     && $node->var instanceof Node\Expr\Variable && $node->var->name === 'this'
                     && $node->name instanceof Node\Identifier && $node->name->name === 'validate'
                     && $node->args[0]->value instanceof Node\Expr\Variable
@@ -56,7 +59,7 @@ class ValidateCallExtractor
             $callToValidate = (new NodeFinder())->findFirst(
                 $methodNode,
                 fn (Node $node) => $node instanceof Node\Expr\StaticCall
-                    && count($node->args) === 2
+                    && count($node->args) >= 2
                     && $node->class instanceof Node\Name && is_a($node->class->toString(), \Illuminate\Support\Facades\Validator::class, true)
                     && $node->name instanceof Node\Identifier && $node->name->name === 'make'
                     && $node->args[0]->value instanceof Node\Expr\MethodCall && is_a($this->getPossibleParamType($methodNode, $node->args[0]->value->var), Request::class, true)
@@ -68,8 +71,12 @@ class ValidateCallExtractor
             return null;
         }
 
+        $phpDocReflector = new SchemaClassDocReflector($callToValidate->getAttribute('parsedPhpDoc', new PhpDocNode([])));
+
         return new ValidationNodesResult(
             $validationRules instanceof Node\Arg ? $validationRules->value : $validationRules,
+            schemaName: $phpDocReflector->getSchemaName(),
+            description: $phpDocReflector->getDescription(),
         );
     }
 
@@ -83,6 +90,7 @@ class ValidateCallExtractor
             $validationRulesCode = $printer->prettyPrint([$validationRules]);
 
             $injectableParams = collect($methodNode->getParams())
+                ->filter(fn (Node\Param $param) => isset($param->type->name))
                 ->filter(fn (Node\Param $param) => ! class_exists($className = (string) $param->type) || ! is_a($className, Request::class, true))
                 ->filter(fn (Node\Param $param) => isset($param->var->name) && is_string($param->var->name))
                 ->mapWithKeys(function (Node\Param $param) {
@@ -121,9 +129,13 @@ class ValidateCallExtractor
     {
         $paramsMap = collect($methodNode->getParams())
             ->mapWithKeys(function (Node\Param $param) {
+                if (! isset($param->type->name)) {
+                    return [];
+                }
+
                 try {
                     return [
-                        $param->var->name => implode('\\', $param->type->parts ?? []),
+                        $param->var->name => $param->type->name,
                     ];
                 } catch (\Throwable $exception) {
                     throw $exception;

@@ -1,6 +1,8 @@
 <?php
 
 use Dedoc\Scramble\Tests\Files\SampleUserModel;
+use Dedoc\Scramble\Tests\Files\Status;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route as RouteFacade;
 
 it('uses getRouteKeyName to determine model route key type', function () {
@@ -23,9 +25,30 @@ class ModelWithCustomRouteKeyName extends \Illuminate\Database\Eloquent\Model
 }
 class Foo_RequestEssentialsExtensionTest_Controller
 {
-    public function foo(ModelWithCustomRouteKeyName $model)
+    public function foo(ModelWithCustomRouteKeyName $model) {}
+}
+
+it('correctly handles not request class with rules method', function () {
+    $openApiDocument = generateForRoute(function () {
+        return RouteFacade::get('api/test/{model}', [Foo_RequestRulesTest_Controller::class, 'foo']);
+    });
+
+    expect($openApiDocument['paths']['/test/{model}']['get']['parameters'][0])
+        ->toHaveKey('schema.type', 'integer')
+        ->toHaveKey('description', 'The model ID');
+});
+class ModelWithRulesMethod extends \Illuminate\Database\Eloquent\Model
+{
+    protected $table = 'users';
+
+    public function rules()
     {
+        return [];
     }
+}
+class Foo_RequestRulesTest_Controller
+{
+    public function foo(ModelWithRulesMethod $model) {}
 }
 
 it('handles custom key from route to determine model route key type', function () {
@@ -49,7 +72,57 @@ it('determines default model route key type', function () {
 });
 class CustomKey_RequestEssentialsExtensionTest_Controller
 {
-    public function foo(SampleUserModel $user)
+    public function foo(SampleUserModel $user) {}
+}
+
+it('determines default route key type for union', function () {
+    $openApiDocument = generateForRoute(function () {
+        return RouteFacade::get('api/test/{user}', [UnionKey_RequestEssentialsExtensionTest_Controller::class, 'foo']);
+    });
+
+    expect($openApiDocument['paths']['/test/{user}']['get']['parameters'][0]['schema'])
+        ->toBe([
+            'anyOf' => [
+                ['type' => 'string'],
+                ['type' => 'integer'],
+            ],
+        ]);
+});
+class UnionKey_RequestEssentialsExtensionTest_Controller
+{
+    public function foo(Request $request, string|int $user)
     {
+        $request->validate(['foo' => 'required']);
     }
+}
+
+it('determines route key type for nullable', function () {
+    $openApiDocument = generateForRoute(function () {
+        return RouteFacade::get('api/test/{user}', [NullableKey_RequestEssentialsExtensionTest_Controller::class, 'foo']);
+    });
+
+    expect($openApiDocument['paths']['/test/{user}']['get']['parameters'][0]['schema'])
+        ->toBe([
+            'type' => ['integer', 'null'],
+        ]);
+});
+class NullableKey_RequestEssentialsExtensionTest_Controller
+{
+    public function foo(Request $request, ?int $user)
+    {
+        $request->validate(['foo' => 'required']);
+    }
+}
+
+it('handles enum in route parameter', function () {
+    $openApiDocument = generateForRoute(function () {
+        return RouteFacade::get('api/test/{status}', [EnumParameter_RequestEssentialsExtensionTest_Controller::class, 'foo']);
+    });
+
+    expect($openApiDocument['paths']['/test/{status}']['get']['parameters'][0])
+        ->toHaveKey('schema.$ref', '#/components/schemas/Status');
+});
+class EnumParameter_RequestEssentialsExtensionTest_Controller
+{
+    public function foo(Status $status) {}
 }

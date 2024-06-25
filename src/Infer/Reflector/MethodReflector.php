@@ -19,9 +19,7 @@ class MethodReflector
     private ?ClassMethod $methodNode = null;
 
     private function __construct(
-        private FileParser $parser, public string $className, public string $name)
-    {
-    }
+        private FileParser $parser, public string $className, public string $name) {}
 
     public static function make(string $className, string $name)
     {
@@ -36,8 +34,13 @@ class MethodReflector
     {
         $reflection = $this->getReflection();
 
+        // The class may be a part of standard PHP classes.
+        if (! $path = $reflection->getFileName()) {
+            return '';
+        }
+
         return implode("\n", array_slice(
-            preg_split('/\r\n|\r|\n/', file_get_contents($reflection->getFileName())),
+            preg_split('/\r\n|\r|\n/', file_get_contents($path)),
             $reflection->getStartLine() - 1,
             $reflection->getStartLine() === $reflection->getEndLine() ? 1 : max($reflection->getEndLine() - $reflection->getStartLine(), 1) + 1,
         ));
@@ -48,13 +51,21 @@ class MethodReflector
         return new ReflectionMethod($this->className, $this->name);
     }
 
-    public function getAstNode(): ClassMethod
+    /**
+     * @todo: Think if this method can actually return `null` or it should fail.
+     */
+    public function getAstNode(): ?ClassMethod
     {
         if (! $this->methodNode) {
             $className = class_basename($this->className);
+            $methodReflection = $this->getReflection();
 
-            $methodDoc = $this->getReflection()->getDocComment() ?: '';
-            $partialClass = "<?php\nclass $className {\n".$methodDoc."\n".$this->getMethodCode()."\n}";
+            $methodDoc = $methodReflection->getDocComment() ?: '';
+            $lines = $methodReflection->getStartLine();
+
+            $lines = str_repeat("\n", max($lines - 3 - substr_count($methodDoc, "\n"), 1));
+
+            $partialClass = "<?php$lines class $className {\n".$methodDoc."\n".$this->getMethodCode()."\n}";
 
             $statements = $this->parser->parseContent($partialClass)->getStatements();
             $node = (new NodeFinder())
@@ -73,7 +84,7 @@ class MethodReflector
                     $this->nameContext = $nameContext;
                 }
 
-                public function beforeTraverse(array $nodes)
+                public function beforeTraverse(array $nodes): ?array
                 {
                     return null;
                 }
@@ -92,6 +103,6 @@ class MethodReflector
 
     public function getClassReflector(): ClassReflector
     {
-        return ClassReflector::make($this->className);
+        return ClassReflector::make($this->getReflection()->class);
     }
 }

@@ -30,8 +30,7 @@ class ClassDefinition
         /** @var array<string, FunctionLikeDefinition> $methods */
         public array $methods = [],
         public ?string $parentFqn = null,
-    ) {
-    }
+    ) {}
 
     public function isInstanceOf(string $className)
     {
@@ -43,7 +42,12 @@ class ClassDefinition
         return $this->isInstanceOf($className) && $this->name !== $className;
     }
 
-    public function getMethodDefinition(string $name, Scope $scope = new GlobalScope)
+    public function hasMethodDefinition(string $name): bool
+    {
+        return array_key_exists($name, $this->methods);
+    }
+
+    public function getMethodDefinition(string $name, Scope $scope = new GlobalScope, array $indexBuilders = [])
     {
         if (! array_key_exists($name, $this->methods)) {
             return null;
@@ -55,7 +59,7 @@ class ClassDefinition
             $this->methods[$name] = (new MethodAnalyzer(
                 $scope->index,
                 $this
-            ))->analyze($methodDefinition);
+            ))->analyze($methodDefinition, $indexBuilders);
         }
 
         $methodScope = new Scope(
@@ -72,6 +76,13 @@ class ClassDefinition
                     ->mergeAttributes($returnType->attributes())
             );
         }
+        foreach ($this->methods[$name]->type->exceptions as $i => $exceptionType) {
+            if (ReferenceTypeResolver::hasResolvableReferences($exceptionType)) {
+                $this->methods[$name]->type->exceptions[$i] = (new ReferenceTypeResolver($scope->index))
+                    ->resolve($methodScope, $exceptionType)
+                    ->mergeAttributes($exceptionType->attributes());
+            }
+        }
 
         return $this->methods[$name];
     }
@@ -81,7 +92,7 @@ class ClassDefinition
         return $this->properties[$name] ?? null;
     }
 
-    public function getMethodCallType(string $name, ObjectType $calledOn = null)
+    public function getMethodCallType(string $name, ?ObjectType $calledOn = null)
     {
         $methodDefinition = $this->methods[$name] ?? null;
 

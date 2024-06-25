@@ -5,41 +5,43 @@ namespace Dedoc\Scramble\Support\OperationExtensions\RulesExtractor;
 use Dedoc\Scramble\PhpDoc\PhpDocTypeHelper;
 use Dedoc\Scramble\Support\Generator\Parameter;
 use Dedoc\Scramble\Support\Generator\Schema;
+use Dedoc\Scramble\Support\Generator\Types\StringType;
 use Dedoc\Scramble\Support\Generator\Types\Type as OpenApiType;
 use Dedoc\Scramble\Support\Generator\Types\UnknownType;
 use Dedoc\Scramble\Support\Generator\TypeTransformer;
+use Dedoc\Scramble\Support\Helpers\ExamplesExtractor;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
 use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocNode;
 
 class RulesToParameter
 {
-    private string $name;
-
-    private array $rules;
-
-    private TypeTransformer $openApiTransformer;
-
-    private ?PhpDocNode $docNode;
-
     const RULES_PRIORITY = [
         'bool', 'boolean', 'numeric', 'int', 'integer', 'file', 'image', 'string', 'array', 'exists',
     ];
 
-    public function __construct(string $name, $rules, ?PhpDocNode $docNode, TypeTransformer $openApiTransformer)
-    {
-        $this->name = $name;
+    private array $rules;
+
+    public function __construct(
+        private string $name,
+        $rules,
+        private ?PhpDocNode $docNode,
+        private TypeTransformer $openApiTransformer,
+    ) {
         $this->rules = Arr::wrap(is_string($rules) ? explode('|', $rules) : $rules);
-        $this->docNode = $docNode;
-        $this->openApiTransformer = $openApiTransformer;
     }
 
     public function generate()
     {
+        if (count($this->docNode?->getTagsByName('@ignoreParam') ?? [])) {
+            return null;
+        }
+
         $rules = collect($this->rules)
             ->map(fn ($v) => method_exists($v, '__toString') ? $v->__toString() : $v)
             ->sortByDesc($this->rulesSorter());
 
+        /** @var OpenApiType $type */
         $type = $rules->reduce(function (OpenApiType $type, $rule) {
             if (is_string($rule)) {
                 return $this->getTypeFromStringRule($type, $rule);
@@ -70,32 +72,9 @@ class RulesToParameter
         $description = (string) Str::of($this->docNode->getAttribute('summary') ?: '')
             ->append(' '.($this->docNode->getAttribute('description') ?: ''))
             ->trim();
+
         if ($description) {
             $parameter->description($description);
-        }
-
-        if (count($example = $this->docNode->getTagsByName('@example'))) {
-            $exampleValue = array_values($example)[0]->value->value ?? null;
-
-            if (is_string($exampleValue)) {
-                if (function_exists('json_decode')) {
-                    $json = json_decode($exampleValue, true);
-
-                    $exampleValue = $json === null || $json == $exampleValue
-                        ? $exampleValue
-                        : $json;
-                }
-
-                if ($exampleValue === 'null') {
-                    $exampleValue = null;
-                } elseif (in_array($exampleValue, ['true', 'false'])) {
-                    $exampleValue = $exampleValue === 'true';
-                } elseif (is_numeric($exampleValue)) {
-                    $exampleValue = floatval($exampleValue);
-                }
-
-                $parameter->example($exampleValue);
-            }
         }
 
         if (count($varTags = $this->docNode->getVarTagValues())) {
@@ -104,6 +83,18 @@ class RulesToParameter
             $parameter->setSchema(Schema::fromType(
                 $this->openApiTransformer->transform(PhpDocTypeHelper::toType($varTag->type)),
             ));
+        }
+
+        if ($examples = ExamplesExtractor::make($this->docNode)->extract(preferString: $parameter->schema->type instanceof StringType)) {
+            $parameter->example($examples[0]);
+        }
+
+        if ($default = ExamplesExtractor::make($this->docNode, '@default')->extract(preferString: $parameter->schema->type instanceof StringType)) {
+            $parameter->default($default[0]);
+        }
+
+        if ($this->docNode->getTagsByName('@query')) {
+            $parameter->setAttribute('isInQuery', true);
         }
 
         return $parameter;

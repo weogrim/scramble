@@ -4,14 +4,13 @@ namespace Dedoc\Scramble\Support\OperationExtensions;
 
 use Dedoc\Scramble\Extensions\OperationExtension;
 use Dedoc\Scramble\Infer;
+use Dedoc\Scramble\PhpDoc\PhpDocTypeHelper;
+use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
 use Dedoc\Scramble\Support\Generator\Operation;
 use Dedoc\Scramble\Support\Generator\Parameter;
 use Dedoc\Scramble\Support\Generator\Schema;
 use Dedoc\Scramble\Support\Generator\Server;
-use Dedoc\Scramble\Support\Generator\Types\BooleanType;
-use Dedoc\Scramble\Support\Generator\Types\IntegerType;
-use Dedoc\Scramble\Support\Generator\Types\NumberType;
 use Dedoc\Scramble\Support\Generator\Types\StringType;
 use Dedoc\Scramble\Support\Generator\Types\Type;
 use Dedoc\Scramble\Support\Generator\TypeTransformer;
@@ -19,7 +18,12 @@ use Dedoc\Scramble\Support\Generator\UniqueNameOptions;
 use Dedoc\Scramble\Support\PhpDoc;
 use Dedoc\Scramble\Support\RouteInfo;
 use Dedoc\Scramble\Support\ServerFactory;
+use Dedoc\Scramble\Support\Type\IntegerType;
 use Dedoc\Scramble\Support\Type\ObjectType;
+use Dedoc\Scramble\Support\Type\Type as InferType;
+use Dedoc\Scramble\Support\Type\TypeHelper;
+use Dedoc\Scramble\Support\Type\Union;
+use Dedoc\Scramble\Support\Type\UnknownType;
 use Illuminate\Contracts\Container\BindingResolutionException;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
@@ -29,6 +33,7 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
 use PHPStan\PhpDocParser\Ast\PhpDoc\ParamTagValueNode;
 use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocNode;
+use ReflectionParameter;
 
 class RequestEssentialsExtension extends OperationExtension
 {
@@ -49,7 +54,14 @@ class RequestEssentialsExtension extends OperationExtension
 
     public function handle(Operation $operation, RouteInfo $routeInfo)
     {
-        [$pathParams, $pathAliases] = $this->getRoutePathParameters($routeInfo->route, $routeInfo->phpDoc());
+        [$pathParams, $pathAliases] = $this->getRoutePathParameters($routeInfo);
+
+        $tagResolver = Scramble::$tagResolver ?? function (RouteInfo $routeInfo) {
+            return array_unique([
+                ...$this->extractTagsForMethod($routeInfo),
+                Str::of(class_basename($routeInfo->className()))->replace('Controller', ''),
+            ]);
+        };
 
         $operation
             ->setMethod(strtolower($routeInfo->route->methods()[0]))
@@ -58,10 +70,7 @@ class RequestEssentialsExtension extends OperationExtension
                 collect($pathAliases)->values()->map(fn ($v) => '{'.$v.'}')->all(),
                 $routeInfo->route->uri,
             ))
-            ->setTags(array_unique([
-                ...$this->extractTagsForMethod($routeInfo),
-                Str::of(class_basename($routeInfo->className()))->replace('Controller', ''),
-            ]))
+            ->setTags($tagResolver($routeInfo, $operation))
             ->servers($this->getAlternativeServers($routeInfo->route))
             ->addParameters($pathParams);
 
@@ -130,7 +139,7 @@ class RequestEssentialsExtension extends OperationExtension
             return [];
         }
 
-        return explode(',', Arr::first($tagNodes)->value->value);
+        return explode(',', array_values($tagNodes)[0]->value->value);
     }
 
     private function getParametersFromString(?string $str)
@@ -138,12 +147,14 @@ class RequestEssentialsExtension extends OperationExtension
         return Str::of($str)->matchAll('/\{(.*?)\}/')->values()->toArray();
     }
 
-    private function getRoutePathParameters(Route $route, ?PhpDocNode $methodPhpDocNode)
+    private function getRoutePathParameters(RouteInfo $routeInfo)
     {
+        [$route, $methodPhpDocNode] = [$routeInfo->route, $routeInfo->phpDoc()];
+
         $paramNames = $route->parameterNames();
         $paramsWithRealNames = ($reflectionParams = collect($route->signatureParameters())
-            ->filter(function (\ReflectionParameter $v) {
-                if (($type = $v->getType()) && $typeName = $type->getName()) {
+            ->filter(function (ReflectionParameter $v) {
+                if (($type = $v->getType()) && ($type instanceof \ReflectionNamedType) && ($typeName = $type->getName())) {
                     if (is_a($typeName, Request::class, true)) {
                         return false;
                     }
@@ -152,7 +163,7 @@ class RequestEssentialsExtension extends OperationExtension
                 return true;
             })
             ->values())
-            ->map(fn (\ReflectionParameter $v) => $v->name)
+            ->map(fn (ReflectionParameter $v) => $v->name)
             ->all();
 
         if (count($paramNames) !== count($paramsWithRealNames)) {
@@ -172,47 +183,18 @@ class RequestEssentialsExtension extends OperationExtension
          * 2. PhpDoc Typehint
          * 3. String (?)
          */
-        $params = array_map(function (string $paramName) use ($route, $aliases, $reflectionParamsByKeys, $phpDocTypehintParam) {
+        $params = array_map(function (string $paramName) use ($routeInfo, $route, $aliases, $reflectionParamsByKeys, $phpDocTypehintParam) {
             $paramName = $aliases[$paramName];
 
-            $description = '';
-            $type = null;
-
-            if (isset($reflectionParamsByKeys[$paramName]) || isset($phpDocTypehintParam[$paramName])) {
-                /** @var ParamTagValueNode $docParam */
-                if ($docParam = $phpDocTypehintParam[$paramName] ?? null) {
-                    if ($docType = $docParam->type) {
-                        $type = (string) $docType;
-                    }
-                    if ($docParam->description) {
-                        $description = $docParam->description;
-                    }
-                }
-
-                if (
-                    ($reflectionParam = $reflectionParamsByKeys[$paramName] ?? null)
-                    && ($reflectionParam->hasType())
-                ) {
-                    /** @var \ReflectionParameter $reflectionParam */
-                    $type = $reflectionParam->getType()->getName();
-                }
-            }
-
-            $schemaTypesMap = [
-                'int' => new IntegerType(),
-                'float' => new NumberType(),
-                'string' => new StringType(),
-                'bool' => new BooleanType(),
-            ];
-            $schemaType = $type ? ($schemaTypesMap[$type] ?? new IntegerType) : new StringType;
-
-            $isModelId = $type && ! isset($schemaTypesMap[$type]);
-
-            if ($isModelId) {
-                [$schemaType, $description] = $this->getModelIdTypeAndDescription($schemaType, $type, $paramName, $description, $route->bindingFields()[$paramName] ?? null);
-
-                $schemaType->setAttribute('isModelId', true);
-            }
+            $description = $phpDocTypehintParam[$paramName]?->description ?? '';
+            [$schemaType, $description] = $this->getParameterType(
+                $paramName,
+                $description,
+                $routeInfo,
+                $route,
+                $phpDocTypehintParam[$paramName] ?? null,
+                $reflectionParamsByKeys[$paramName] ?? null,
+            );
 
             return Parameter::make($paramName, 'path')
                 ->description($description)
@@ -222,9 +204,47 @@ class RequestEssentialsExtension extends OperationExtension
         return [$params, $aliases];
     }
 
+    private function getParameterType(string $paramName, string $description, RouteInfo $routeInfo, Route $route, ?ParamTagValueNode $phpDocParam, ?ReflectionParameter $reflectionParam)
+    {
+        $type = new UnknownType;
+        if ($routeInfo->reflectionMethod()) {
+            $type->setAttribute('file', $routeInfo->reflectionMethod()->getFileName());
+            $type->setAttribute('line', $routeInfo->reflectionMethod()->getStartLine());
+        }
+
+        if ($phpDocParam?->type) {
+            $type = PhpDocTypeHelper::toType($phpDocParam->type);
+        }
+
+        if ($reflectionParam?->hasType()) {
+            $type = TypeHelper::createTypeFromReflectionType($reflectionParam->getType());
+        }
+
+        $simplifiedType = Union::wrap(array_map(
+            fn (InferType $t) => $t instanceof ObjectType
+                ? (enum_exists($t->name) ? $t : new \Dedoc\Scramble\Support\Type\StringType)
+                : $t,
+            $type instanceof Union ? $type->types : [$type],
+        ));
+
+        $schemaType = $this->openApiTransformer->transform($simplifiedType);
+
+        if ($isModelId = $type instanceof ObjectType) {
+            [$schemaType, $description] = $this->getModelIdTypeAndDescription($schemaType, $type, $paramName, $description, $route->bindingFields()[$paramName] ?? null);
+
+            $schemaType->setAttribute('isModelId', true);
+        }
+
+        if ($schemaType instanceof \Dedoc\Scramble\Support\Generator\Types\UnknownType) {
+            $schemaType = (new StringType)->mergeAttributes($schemaType->attributes());
+        }
+
+        return [$schemaType, $description ?? ''];
+    }
+
     private function getModelIdTypeAndDescription(
         Type $baseType,
-        string $type,
+        InferType $type,
         string $paramName,
         string $description,
         ?string $bindingField,
@@ -234,18 +254,19 @@ class RequestEssentialsExtension extends OperationExtension
             $description ?: 'The '.Str::of($paramName)->kebab()->replace(['-', '_'], ' ').' ID',
         ];
 
-        if (! is_a($type, Model::class, true)) {
+        if (! $type->isInstanceOf(Model::class)) {
             return $defaults;
         }
+
+        /** @var ObjectType $type */
+        $defaults[0] = $this->openApiTransformer->transform(new IntegerType);
 
         try {
             /** @var Model $modelInstance */
-            $modelInstance = resolve($type);
+            $modelInstance = resolve($type->name);
         } catch (BindingResolutionException) {
             return $defaults;
         }
-
-        $this->infer->analyzeClass($type);
 
         $modelKeyName = $modelInstance->getKeyName();
         $routeKeyName = $bindingField ?: $modelInstance->getRouteKeyName();
@@ -258,14 +279,17 @@ class RequestEssentialsExtension extends OperationExtension
             $description = 'The '.Str::of($paramName)->kebab()->replace(['-', '_'], ' ').' '.$keyDescriptionName;
         }
 
-        $modelTraits = class_uses($type);
+        $modelTraits = class_uses($type->name);
         if ($routeKeyName === $modelKeyName && Arr::has($modelTraits, HasUuids::class)) {
             return [(new StringType)->format('uuid'), $description];
         }
 
-        return [$this->openApiTransformer->transform(
-            (new ObjectType($type))->getPropertyType($routeKeyName),
-        ), $description];
+        $propertyType = $type->getPropertyType($routeKeyName);
+        if ($propertyType instanceof UnknownType) {
+            $propertyType = new IntegerType;
+        }
+
+        return [$this->openApiTransformer->transform($propertyType), $description];
     }
 
     private function getOperationId(RouteInfo $routeInfo)
@@ -284,7 +308,7 @@ class RequestEssentialsExtension extends OperationExtension
 
                 // Using route name as operation ID if set. We need to avoid using generated route names as this
                 // will result gibberish operation IDs when routes without names are cached.
-                if (($name = $routeInfo->route->getName()) && ! Str::startsWith($name, 'generated::')) {
+                if (($name = $routeInfo->route->getName()) && ! Str::contains($name, 'generated::')) {
                     return Str::startsWith($name, 'api.') ? Str::replaceFirst('api.', '', $name) : $name;
                 }
 

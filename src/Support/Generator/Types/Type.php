@@ -9,7 +9,7 @@ abstract class Type
 {
     use WithAttributes;
 
-    protected string $type;
+    public string $type;
 
     public string $format = '';
 
@@ -17,6 +17,12 @@ abstract class Type
 
     /** @var array|scalar|null|MissingExample */
     public $example;
+
+    /** @var array|scalar|null|MissingExample */
+    public $default;
+
+    /** @var array<array|scalar|null|MissingExample> */
+    public $examples = [];
 
     public array $enum = [];
 
@@ -26,6 +32,7 @@ abstract class Type
     {
         $this->type = $type;
         $this->example = new MissingExample;
+        $this->default = new MissingExample;
     }
 
     public function nullable(bool $nullable)
@@ -50,18 +57,29 @@ abstract class Type
         $this->enum = $fromType->enum;
         $this->description = $fromType->description;
         $this->example = $fromType->example;
+        $this->default = $fromType->default;
 
         return $this;
     }
 
     public function toArray()
     {
-        return array_merge(array_filter([
-            'type' => $this->nullable ? [$this->type, 'null'] : $this->type,
-            'format' => $this->format,
-            'description' => $this->description,
-            'enum' => count($this->enum) ? $this->enum : null,
-        ]), $this->example instanceof MissingExample ? [] : ['example' => $this->example]);
+        return array_merge(
+            array_filter([
+                'type' => $this->nullable ? [$this->type, 'null'] : $this->type,
+                'format' => $this->format,
+                'description' => $this->description,
+                'enum' => count($this->enum) ? $this->enum : null,
+            ]),
+            $this->example instanceof MissingExample ? [] : ['example' => $this->example],
+            $this->default instanceof MissingExample ? [] : ['default' => $this->default],
+            count(
+                $examples = collect($this->examples)
+                    ->reject(fn ($example) => $example instanceof MissingExample)
+                    ->values()
+                    ->toArray()
+            ) ? ['examples' => $examples] : [],
+        );
     }
 
     public function setDescription(string $description): Type
@@ -84,6 +102,26 @@ abstract class Type
     public function example($example)
     {
         $this->example = $example;
+
+        return $this;
+    }
+
+    /**
+     * @param  array|scalar|null|MissingExample  $default
+     */
+    public function default($default)
+    {
+        $this->default = $default;
+
+        return $this;
+    }
+
+    /**
+     * @param  array<array|scalar|null|MissingExample>  $examples
+     */
+    public function examples(array $examples)
+    {
+        $this->examples = $examples;
 
         return $this;
     }
